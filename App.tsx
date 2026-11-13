@@ -114,6 +114,9 @@ export default function App() {
   const [newMemoryCategory, setNewMemoryCategory] = useState<string>('preference');
   const [newMemoryImportance, setNewMemoryImportance] = useState<number>(2);
   const [isAddingMemory, setIsAddingMemory] = useState(false);
+  const [memorySubView, setMemorySubView] = useState<'nodes' | 'dialogue'>('nodes');
+  const [dialogueLogs, setDialogueLogs] = useState<any[]>([]);
+  const [lifetimeStats, setLifetimeStats] = useState<{ totalMemories: number; totalInteractions: number; firstInteraction: string | null; lastInteraction: string | null } | null>(null);
   
   // SQL Explorer State
   const [sqlQuery, setSqlQuery] = useState('SELECT id, category, content, importance, created_at FROM memories ORDER BY importance DESC;');
@@ -163,10 +166,27 @@ export default function App() {
         query: memorySearch
       });
       setMemories(data);
+      const stats = await dbService.getLifetimeStats();
+      setLifetimeStats(stats);
+      if (memorySubView === 'dialogue') {
+        const history = await dbService.getConversationHistory(60, 0, memorySearch);
+        setDialogueLogs(history);
+      }
     } catch (e) {
       console.warn("Failed to load memories from Postgres Lite:", e);
     }
-  }, [selectedCategory, memorySearch]);
+  }, [selectedCategory, memorySearch, memorySubView]);
+
+  const refreshLifetimeData = useCallback(async () => {
+    try {
+      const stats = await dbService.getLifetimeStats();
+      setLifetimeStats(stats);
+      const history = await dbService.getConversationHistory(60, 0, memorySearch);
+      setDialogueLogs(history);
+    } catch (e) {
+      console.warn("Failed to refresh lifetime dialogue logs:", e);
+    }
+  }, [memorySearch]);
 
   // Load persisted settings and memories from Postgres Lite on initial mount
   useEffect(() => {
@@ -178,8 +198,9 @@ export default function App() {
           setSelectedVoice(savedVoice);
         }
 
-        // Load memories from Postgres Lite
+        // Load memories and stats from Postgres Lite
         await refreshMemories();
+        await refreshLifetimeData();
 
         // Also check API key from Postgres or localStorage
         const dbApiKey = await dbService.getSetting('api_key', '');
@@ -225,7 +246,8 @@ export default function App() {
       if (msg.metadata?.image) {
         setActiveMedia(msg);
       }
-      // If a memory was saved or modified, refresh memory list
+      // Refresh lifetime history and memory lists
+      refreshLifetimeData();
       if (msg.text?.includes('Memory') || msg.text?.includes('Postgres Lite')) {
         refreshMemories();
       }
@@ -1023,123 +1045,228 @@ export default function App() {
           </button>
         </div>
 
-        {/* TAB 1: MEMORIES LIST & SEARCH */}
+        {/* TAB 1: MEMORIES & LIFELONG CONTINUITY */}
         {leftTab === 'memories' && (
           <div className="flex-1 flex flex-col min-h-0">
-            {/* Search and Category Filter */}
-            <div className="space-y-2 mb-3">
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#78756d]" />
-                <input
-                  type="text"
-                  value={memorySearch}
-                  onChange={(e) => setMemorySearch(e.target.value)}
-                  placeholder="Search Postgres Lite memory..."
-                  className="w-full bg-[#111217] border border-white/[0.08] rounded-xl pl-9 pr-3 py-2 text-xs text-[#ece9df] placeholder-[#65635b] focus:outline-none focus:border-[#d4af77]/50"
-                />
+            {/* Lifelong Continuity Header Card */}
+            <div className="p-3 mb-3 rounded-xl bg-gradient-to-br from-[#d4af77]/10 via-white/[0.02] to-transparent border border-[#d4af77]/20 flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-mono-code uppercase tracking-wider text-[#d4af77] flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#d4af77] animate-pulse"></span>
+                  Lifelong Postgres Lite Vault
+                </span>
+                <span className="text-[9px] font-mono-code px-1.5 py-0.5 rounded bg-[#d4af77]/15 text-[#f5eedc] border border-[#d4af77]/30">
+                  IndexedDB
+                </span>
               </div>
-
-              <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px] no-scrollbar">
-                {['all', 'preference', 'fact', 'identity', 'system'].map(cat => (
-                  <button
-                    key={cat}
-                    onClick={() => setSelectedCategory(cat)}
-                    className={`px-2.5 py-1 rounded-lg capitalize whitespace-nowrap transition-colors ${
-                      selectedCategory === cat 
-                        ? 'bg-[#d4af77]/20 border border-[#d4af77]/40 text-[#f5eedc]' 
-                        : 'bg-white/[0.02] border border-white/[0.05] text-[#807d73] hover:text-[#ece9df]'
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                ))}
+              <div className="text-xs text-[#dedad0] flex items-center justify-between">
+                <span>{lifetimeStats ? `${lifetimeStats.totalInteractions} interactions logged` : 'Logging every turn'}</span>
+                <span className="text-[#848177]">•</span>
+                <span>{memories.length} knowledge nodes</span>
               </div>
             </div>
 
-            {/* Quick Add Memory Toggle */}
-            <div className="mb-3">
-              {!isAddingMemory ? (
-                <button
-                  onClick={() => setIsAddingMemory(true)}
-                  className="w-full py-2 px-3 rounded-xl border border-dashed border-white/[0.12] hover:border-[#d4af77]/40 text-xs text-[#9d998f] hover:text-[#f5eedc] flex items-center justify-center gap-1.5 transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Teach June something new</span>
-                </button>
-              ) : (
-                <form onSubmit={handleAddMemory} className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.08] space-y-2">
-                  <textarea
-                    value={newMemoryText}
-                    onChange={(e) => setNewMemoryText(e.target.value)}
-                    placeholder="Enter fact, preference, or context for June to remember..."
-                    rows={2}
-                    className="w-full bg-[#111217] border border-white/[0.08] rounded-lg p-2 text-xs text-[#ece9df] placeholder-[#65635b] focus:outline-none focus:border-[#d4af77]/50 resize-none"
-                    autoFocus
-                  />
-                  <div className="flex items-center justify-between gap-2">
-                    <select
-                      value={newMemoryCategory}
-                      onChange={(e) => setNewMemoryCategory(e.target.value)}
-                      className="bg-[#111217] border border-white/[0.08] rounded-lg px-2 py-1 text-[11px] text-[#c2beb2] focus:outline-none"
+            {/* Sub-view Switcher: Knowledge Nodes vs Lifelong Dialogue Log */}
+            <div className="grid grid-cols-2 gap-1 p-1 bg-white/[0.02] border border-white/[0.06] rounded-xl mb-3 text-[11px] font-medium">
+              <button
+                onClick={() => setMemorySubView('nodes')}
+                className={`py-1 rounded-lg transition-colors ${
+                  memorySubView === 'nodes' 
+                    ? 'bg-[#d4af77]/20 border border-[#d4af77]/30 text-[#f5eedc]' 
+                    : 'text-[#848177] hover:text-[#dedad0]'
+                }`}
+              >
+                Knowledge Nodes ({memories.length})
+              </button>
+              <button
+                onClick={() => {
+                  setMemorySubView('dialogue');
+                  refreshLifetimeData();
+                }}
+                className={`py-1 rounded-lg transition-colors ${
+                  memorySubView === 'dialogue' 
+                    ? 'bg-[#d4af77]/20 border border-[#d4af77]/30 text-[#f5eedc]' 
+                    : 'text-[#848177] hover:text-[#dedad0]'
+                }`}
+              >
+                Lifelong Dialogue Log {lifetimeStats ? `(${lifetimeStats.totalInteractions})` : ''}
+              </button>
+            </div>
+
+            {/* Search Input across Memory Vault */}
+            <div className="relative mb-3">
+              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-[#78756d]" />
+              <input
+                type="text"
+                value={memorySearch}
+                onChange={(e) => setMemorySearch(e.target.value)}
+                placeholder={memorySubView === 'nodes' ? "Search knowledge nodes..." : "Search across lifetime dialogue history..."}
+                className="w-full bg-[#111217] border border-white/[0.08] rounded-xl pl-9 pr-3 py-2 text-xs text-[#ece9df] placeholder-[#65635b] focus:outline-none focus:border-[#d4af77]/50"
+              />
+            </div>
+
+            {/* VIEW A: KNOWLEDGE NODES */}
+            {memorySubView === 'nodes' && (
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="flex items-center gap-1 overflow-x-auto pb-2 mb-2 text-[11px] no-scrollbar">
+                  {['all', 'preference', 'project', 'fact', 'identity', 'system'].map(cat => (
+                    <button
+                      key={cat}
+                      onClick={() => setSelectedCategory(cat)}
+                      className={`px-2.5 py-1 rounded-lg capitalize whitespace-nowrap transition-colors ${
+                        selectedCategory === cat 
+                          ? 'bg-[#d4af77]/20 border border-[#d4af77]/40 text-[#f5eedc]' 
+                          : 'bg-white/[0.02] border border-white/[0.05] text-[#807d73] hover:text-[#ece9df]'
+                      }`}
                     >
-                      <option value="preference">Preference</option>
-                      <option value="fact">Fact</option>
-                      <option value="project">Project</option>
-                      <option value="personal">Personal</option>
-                    </select>
-
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setIsAddingMemory(false)}
-                        className="px-2.5 py-1 text-[11px] text-[#807d73] hover:text-[#ece9df]"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="submit"
-                        disabled={!newMemoryText.trim()}
-                        className="px-3 py-1 rounded-lg bg-[#d4af77] text-[#14151a] font-medium text-[11px] hover:bg-[#e0be89] disabled:opacity-40"
-                      >
-                        Save
-                      </button>
-                    </div>
-                  </div>
-                </form>
-              )}
-            </div>
-
-            {/* Memories List */}
-            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-              {memories.length === 0 ? (
-                <div className="text-center py-10 text-xs text-[#706d64]">
-                  No memories found in Postgres Lite database.
+                      {cat}
+                    </button>
+                  ))}
                 </div>
-              ) : (
-                memories.map((m) => (
-                  <div 
-                    key={m.id}
-                    className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.05] hover:border-white/[0.1] transition-all group relative"
-                  >
-                    <div className="flex items-center justify-between gap-2 mb-1">
-                      <span className="text-[10px] font-mono-code uppercase px-2 py-0.5 rounded bg-[#d4af77]/10 text-[#d4af77] border border-[#d4af77]/20">
-                        {m.category}
-                      </span>
-                      <button
-                        onClick={() => handleDeleteMemory(m.id)}
-                        className="opacity-0 group-hover:opacity-100 text-[#7a776e] hover:text-red-400 p-1 transition-opacity"
-                        title="Delete memory"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
+
+                {/* Quick Add Memory Toggle */}
+                <div className="mb-3">
+                  {!isAddingMemory ? (
+                    <button
+                      onClick={() => setIsAddingMemory(true)}
+                      className="w-full py-2 px-3 rounded-xl border border-dashed border-white/[0.12] hover:border-[#d4af77]/40 text-xs text-[#9d998f] hover:text-[#f5eedc] flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Teach June something new</span>
+                    </button>
+                  ) : (
+                    <form onSubmit={handleAddMemory} className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.08] space-y-2">
+                      <textarea
+                        value={newMemoryText}
+                        onChange={(e) => setNewMemoryText(e.target.value)}
+                        placeholder="Enter fact, preference, or context for June to remember..."
+                        rows={2}
+                        className="w-full bg-[#111217] border border-white/[0.08] rounded-lg p-2 text-xs text-[#ece9df] placeholder-[#65635b] focus:outline-none focus:border-[#d4af77]/50 resize-none"
+                        autoFocus
+                      />
+                      <div className="flex items-center justify-between gap-2">
+                        <select
+                          value={newMemoryCategory}
+                          onChange={(e) => setNewMemoryCategory(e.target.value)}
+                          className="bg-[#111217] border border-white/[0.08] rounded-lg px-2 py-1 text-[11px] text-[#c2beb2] focus:outline-none"
+                        >
+                          <option value="preference">Preference</option>
+                          <option value="project">Project</option>
+                          <option value="fact">Fact</option>
+                          <option value="personal">Personal</option>
+                        </select>
+
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setIsAddingMemory(false)}
+                            className="px-2.5 py-1 text-[11px] text-[#807d73] hover:text-[#ece9df]"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={!newMemoryText.trim()}
+                            className="px-3 py-1 rounded-lg bg-[#d4af77] text-[#14151a] font-medium text-[11px] hover:bg-[#e0be89] disabled:opacity-40"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    </form>
+                  )}
+                </div>
+
+                {/* Memories List */}
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+                  {memories.length === 0 ? (
+                    <div className="text-center py-10 text-xs text-[#706d64]">
+                      No memories found in Postgres Lite database.
                     </div>
-                    <p className="text-xs text-[#dcd8cb] leading-relaxed">
-                      {m.content}
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
+                  ) : (
+                    memories.map((m) => (
+                      <div 
+                        key={m.id}
+                        className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.05] hover:border-white/[0.1] transition-all group relative"
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className="text-[10px] font-mono-code uppercase px-2 py-0.5 rounded bg-[#d4af77]/10 text-[#d4af77] border border-[#d4af77]/20">
+                            {m.category}
+                          </span>
+                          <button
+                            onClick={() => handleDeleteMemory(m.id)}
+                            className="opacity-0 group-hover:opacity-100 text-[#7a776e] hover:text-red-400 p-1 transition-opacity"
+                            title="Delete memory"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                        <p className="text-xs text-[#dcd8cb] leading-relaxed">
+                          {m.content}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* VIEW B: LIFELONG DIALOGUE LOG TIMELINE */}
+            {memorySubView === 'dialogue' && (
+              <div className="flex-1 flex flex-col min-h-0">
+                <div className="flex items-center justify-between mb-2 px-1 text-[10px] text-[#807d73]">
+                  <span>Showing recent conversations over June's lifetime</span>
+                  <button 
+                    onClick={refreshLifetimeData}
+                    className="text-[#d4af77] hover:underline flex items-center gap-1"
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+                  {dialogueLogs.length === 0 ? (
+                    <div className="text-center py-10 text-xs text-[#706d64]">
+                      {memorySearch ? `No dialogue history matching "${memorySearch}"` : "No conversation logs recorded yet."}
+                    </div>
+                  ) : (
+                    dialogueLogs.map((log) => {
+                      const isUser = log.role === 'user';
+                      const isModel = log.role === 'model';
+                      const timeStr = log.created_at ? new Date(log.created_at).toLocaleString('en-GB', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      }) : '';
+
+                      return (
+                        <div 
+                          key={log.id}
+                          className={`p-2.5 rounded-xl border text-xs leading-relaxed transition-all ${
+                            isUser 
+                              ? 'bg-blue-500/[0.04] border-blue-500/20 text-[#ece9df]' 
+                              : isModel 
+                                ? 'bg-[#d4af77]/[0.04] border-[#d4af77]/20 text-[#f5eedc]' 
+                                : 'bg-white/[0.02] border-white/[0.05] text-[#9c988e]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between text-[10px] font-mono-code mb-1 text-[#78756d]">
+                            <span className={`uppercase font-medium ${isUser ? 'text-blue-400' : isModel ? 'text-[#d4af77]' : 'text-zinc-500'}`}>
+                              {isUser ? 'User' : isModel ? 'June' : 'System'}
+                            </span>
+                            <span>{timeStr}</span>
+                          </div>
+                          <div className="whitespace-pre-wrap break-words">
+                            {log.content}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

@@ -51,10 +51,10 @@ export const VisionSensor: React.FC<VisionSensorProps> = ({
           // DisplaySurface can hint 'monitor' or 'window'
           const displayStream = await navigator.mediaDevices.getDisplayMedia({
             video: {
-              displaySurface: 'window' as any,
-              cursor: 'always' as any,
+              displaySurface: 'window',
+              cursor: 'always',
               frameRate: { ideal: 10, max: 15 }
-            },
+            } as any,
             audio: false
           });
 

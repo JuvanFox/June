@@ -229,6 +229,19 @@ const forgetMemoryTool: FunctionDeclaration = {
   }
 };
 
+const recallLifelongMemoryTool: FunctionDeclaration = {
+  name: "recall_lifelong_memory",
+  description: "Search June's lifelong memory vault in Postgres Lite across ALL past sessions, questions asked, discussions, project facts, repositories, and conversation history over her entire lifetime. Use this whenever the user asks what they previously asked, what was discussed, what repository or stack they use, or to recall any historical context.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      query: { type: Type.STRING, description: "The keyword, question topic, project name, or detail to search across lifelong memory." },
+      limit: { type: Type.INTEGER, description: "Maximum number of historical records to retrieve (default 10)." }
+    },
+    required: ["query"]
+  }
+};
+
 export class LiveService {
   private ai: GoogleGenAI;
   private apiKey: string;
@@ -239,6 +252,9 @@ export class LiveService {
   private inputSource: MediaStreamAudioSourceNode | null = null;
   private processor: ScriptProcessorNode | null = null;
   private mediaStream: MediaStream | null = null;
+  private speechRecognizer: any = null;
+  private lastSpokenUserText: string = '';
+  private currentTurnModelText: string = '';
   private nextStartTime: number = 0;
   private currentCameraFrame: string | null = null;
   private latestVisionFrame: string | null = null;
@@ -403,11 +419,13 @@ You have tools to browse the internet and search Google:
 - To search the internet for current facts, news, weather, or information: invoke 'search_google'.
 - To read or inspect a specific website URL: invoke 'browse_webpage'.
 
-LONG-TERM MEMORY & POSTGRES LITE:
-You possess genuine long-term memory powered by an embedded local Postgres Lite (PGlite) database.
-- When the user shares personal preferences, project rules, schedules, guidelines, or facts to remember, invoke 'remember_detail' to persist it into your Postgres Lite database.
-- When asked what you remember or for details from previous sessions, invoke 'recall_memories' to search your Postgres Lite database.
-- When instructed to remove a memory, invoke 'forget_memory'.
+LIFELONG PERMANENT MEMORY & CONTINUITY (POSTGRES LITE):
+You possess genuine lifelong permanent memory and historical continuity across ALL past sessions, reloads, and months of usage, stored in embedded Postgres Lite.
+- You remember every question the user has ever asked, every project detail, preference, requirement, and decision over your entire lifetime.
+- When the user asks "what did I ask earlier?", "what was the core repository I used?", "what did we discuss yesterday?", or refers to any past work: invoke 'recall_lifelong_memory' with a search query.
+- When the user shares personal preferences, project rules, schedules, guidelines, or facts to remember: invoke 'remember_detail' to persist it into Postgres Lite.
+- When asked what you remember or for details from previous sessions: invoke 'recall_lifelong_memory' or 'recall_memories'.
+- When instructed to remove a memory: invoke 'forget_memory'.
 
 LIVE SCREEN VISION & HANDS-FREE CODING WORKFLOWS:
 You have real-time visual perception of the user's workstation through a live screen/video stream.
@@ -448,6 +466,7 @@ ${memoryContext}`,
               browseWebpageTool,
               rememberDetailTool,
               recallMemoriesTool,
+              recallLifelongMemoryTool,
               forgetMemoryTool,
               createTool, 
               reimagineTool, 
@@ -529,6 +548,10 @@ ${memoryContext}`,
       try { this.outputAudioContext.close(); } catch (_) {}
       this.outputAudioContext = null;
     }
+    if (this.speechRecognizer) {
+      try { this.speechRecognizer.stop(); } catch (_) {}
+      this.speechRecognizer = null;
+    }
     this.nextStartTime = 0;
   }
 
@@ -573,6 +596,45 @@ ${memoryContext}`,
 
       this.inputSource.connect(this.processor);
       this.processor.connect(this.inputAudioContext.destination);
+
+      // Setup parallel speech recognition to transcribe spoken dialogue for lifelong memory
+      if (typeof window !== 'undefined' && !this.speechRecognizer) {
+        const SpeechRec = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+        if (SpeechRec) {
+          try {
+            const recognizer = new SpeechRec();
+            recognizer.continuous = true;
+            recognizer.interimResults = false;
+            recognizer.lang = 'en-US';
+            recognizer.onresult = (event: any) => {
+              for (let i = event.resultIndex; i < event.results.length; i++) {
+                if (event.results[i].isFinal) {
+                  const transcript = event.results[i][0]?.transcript?.trim();
+                  if (transcript && transcript.length > 1) {
+                    this.lastSpokenUserText = transcript;
+                    this.emitMessage({
+                      id: `voice-usr-${Date.now()}`,
+                      role: 'user',
+                      text: transcript,
+                      timestamp: new Date()
+                    });
+                  }
+                }
+              }
+            };
+            recognizer.onerror = () => {};
+            recognizer.onend = () => {
+              if (this.session && this.speechRecognizer) {
+                try { this.speechRecognizer.start(); } catch (_) {}
+              }
+            };
+            recognizer.start();
+            this.speechRecognizer = recognizer;
+          } catch (srErr) {
+            console.warn("Speech recognizer initialization notice:", srErr);
+          }
+        }
+      }
     } catch (err) {
       console.warn("Audio input setup warning:", err);
     }
@@ -639,6 +701,7 @@ ${memoryContext}`,
               browseWebpageTool,
               rememberDetailTool,
               recallMemoriesTool,
+              recallLifelongMemoryTool,
               forgetMemoryTool,
               createTool, 
               createAgentTool, 
@@ -721,6 +784,35 @@ ${memoryContext}`,
               text: `Retrieved ${memories.length} memories: ${memories.map(m => `"${m.content}"`).join('; ')}`,
               timestamp: new Date()
             });
+
+          } else if (fc.name === "recall_lifelong_memory") {
+            const args = fc.args as any;
+            try {
+              const history = await dbService.searchLifetimeHistory(args.query, args.limit || 10);
+              const memSnippets = history.memories.map(m => `• [${m.category.toUpperCase()}] ${m.content}`).join('\n');
+              const convSnippets = history.conversations.map(c => `• [${new Date(c.created_at).toLocaleDateString()}] ${c.role === 'user' ? 'User' : 'June'}: "${c.content}"`).join('\n');
+
+              this.emitMessage({
+                id: `recall-${Date.now()}`,
+                role: 'system',
+                text: `Lifelong Memory Recall ("${args.query}"): ${history.totalMatches} records retrieved across past sessions.`,
+                timestamp: new Date()
+              });
+
+              this.emitMessage({
+                id: `recall-m-${Date.now()}`,
+                role: 'model',
+                text: `From my lifelong Postgres Lite vault across our history, here is what I have recorded regarding "${args.query}":\n\n${memSnippets ? `**Core Knowledge Nodes:**\n${memSnippets}\n\n` : ''}${convSnippets ? `**Past Discussions & Questions:**\n${convSnippets}` : (!memSnippets ? 'No prior discussions matching this keyword found.' : '')}`,
+                timestamp: new Date()
+              });
+            } catch (err: any) {
+              this.emitMessage({
+                id: `recall-err-${Date.now()}`,
+                role: 'model',
+                text: `Memory recall error: ${err.message}`,
+                timestamp: new Date()
+              });
+            }
 
           } else if (fc.name === "execute_terminal_command") {
             const args = fc.args as any;
@@ -998,6 +1090,11 @@ ${memoryContext}`,
           text: response.text,
           timestamp: new Date()
         });
+
+        // Asynchronously extract and commit lasting user facts/preferences to lifelong memory
+        dbService.autoExtractLifelongMemories(trimmed, response.text, this.apiKey).catch(err => {
+          console.warn("Lifelong auto memory extraction notice:", err);
+        });
       }
 
     } catch (err: any) {
@@ -1104,6 +1201,34 @@ ${memoryContext}`,
               timestamp: new Date(),
               metadata: { type: 'text' }
             });
+
+          } else if (fc.name === "recall_lifelong_memory") {
+            const args = fc.args as any;
+            try {
+              const history = await dbService.searchLifetimeHistory(args.query, args.limit || 10);
+              const memLines = history.memories.map(m => `[${m.category.toUpperCase()}] ${m.content}`).join('; ');
+              const convLines = history.conversations.map(c => `[${new Date(c.created_at).toLocaleDateString()}] ${c.role}: "${c.content.slice(0, 150)}"`).join('; ');
+
+              result = {
+                status: "success",
+                query: args.query,
+                totalMatches: history.totalMatches,
+                memoriesCount: history.memories.length,
+                conversationsCount: history.conversations.length,
+                memories: history.memories,
+                conversations: history.conversations,
+                summary: `Lifelong search across all past sessions for "${args.query}" found ${history.totalMatches} records in Postgres Lite. Core memories: ${memLines || 'None'}. Past dialogues: ${convLines || 'None'}. Answer the user with British composure based on these retrieved records.`
+              };
+
+              this.emitMessage({
+                id: fc.id + '_recall_lifetime',
+                role: 'system',
+                text: `Lifelong Memory Recall ("${args.query}"): ${history.totalMatches} records retrieved from Postgres Lite.`,
+                timestamp: new Date()
+              });
+            } catch (err: any) {
+              result = { error: `Memory recall error: ${err.message}` };
+            }
 
           } else if (fc.name === "forget_memory") {
             const args = fc.args as any;
@@ -1551,6 +1676,39 @@ ${memoryContext}`,
       } catch (err) {
         console.warn("Audio playback error:", err);
       }
+    }
+
+    // 3. Track Model Spoken Dialogue & Trigger Lifelong Memory Auto-Extraction
+    let turnText = message.text || '';
+    if (!turnText && message.serverContent?.modelTurn?.parts) {
+      for (const p of message.serverContent.modelTurn.parts) {
+        if (p.text) {
+          turnText += (turnText ? ' ' : '') + p.text;
+        }
+      }
+    }
+
+    if (turnText) {
+      this.currentTurnModelText += (this.currentTurnModelText ? ' ' : '') + turnText;
+    }
+
+    if (message.serverContent?.turnComplete) {
+      if (this.currentTurnModelText.trim()) {
+        const fullReply = this.currentTurnModelText.trim();
+        this.emitMessage({
+          id: `live-m-${Date.now()}`,
+          role: 'model',
+          text: fullReply,
+          timestamp: new Date()
+        });
+
+        if (this.lastSpokenUserText.trim()) {
+          dbService.autoExtractLifelongMemories(this.lastSpokenUserText, fullReply, this.apiKey).catch(err => {
+            console.warn("Lifelong auto memory extraction notice:", err);
+          });
+        }
+      }
+      this.currentTurnModelText = '';
     }
   }
 }
